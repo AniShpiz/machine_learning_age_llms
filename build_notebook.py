@@ -515,31 +515,65 @@ print(f"\\nTop 10 features by correlation:")
 for feat, corr in correlations.head(10).items():
     print(f"  {feat:45s} | r = {corr:.4f}")""")
 
-md("""### 5.2 Mutual Information Scores
-Mutual Information captures both linear and non-linear dependencies between features and the target.""")
+md("""### 5.2 Pearson vs Mutual Information
+We compare two supervised feature ranking methods:
+- **Pearson correlation** (linear association)
+- **Mutual Information** (linear + non-linear association)
 
-code("""# Calculate Mutual Information scores
+Choose which ranked feature set to use for modeling with `FEATURE_SELECTOR`.""")
+
+code("""# Compare feature ranking methods
+N_FEATURES = 250
+FEATURE_SELECTOR = 'pearson'  # 'pearson' or 'mi'
+
+# Pearson (absolute correlation)
+pearson_series = X.corrwith(y).abs().sort_values(ascending=False)
+pearson_features = pearson_series.head(N_FEATURES).index.tolist()
+
+# Mutual Information
 mi_scores = mutual_info_classif(X, y, random_state=42)
 mi_series = pd.Series(mi_scores, index=X.columns).sort_values(ascending=False)
+mi_features = mi_series.head(N_FEATURES).index.tolist()
 
-# Plot top 25 features by MI
-fig, ax = plt.subplots(figsize=(10, 8))
+print(f"Pearson selected: {len(pearson_features)}")
+print(f"MI selected:      {len(mi_features)}")
+print(f"Overlap:          {len(set(pearson_features) & set(mi_features))}")
+
+# Visual comparison of top 25 from each method
+fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+top_pearson = pearson_series.head(25)
+colors_p = plt.cm.viridis(np.linspace(0.2, 0.9, len(top_pearson)))
+top_pearson.plot(kind='barh', ax=axes[0], color=colors_p)
+axes[0].set_title('Top 25 Features by |Pearson Correlation|', fontsize=13, fontweight='bold')
+axes[0].set_xlabel('|Pearson Correlation|')
+axes[0].invert_yaxis()
+
 top_mi = mi_series.head(25)
 colors_mi = plt.cm.magma(np.linspace(0.2, 0.9, len(top_mi)))
-top_mi.plot(kind='barh', ax=ax, color=colors_mi)
-ax.set_title('Top 25 Features by Mutual Information Score', fontsize=14, fontweight='bold')
-ax.set_xlabel('Mutual Information Score')
-ax.invert_yaxis()
+top_mi.plot(kind='barh', ax=axes[1], color=colors_mi)
+axes[1].set_title('Top 25 Features by Mutual Information', fontsize=13, fontweight='bold')
+axes[1].set_xlabel('Mutual Information Score')
+axes[1].invert_yaxis()
+
 plt.tight_layout()
 plt.show()
 
-# Select top features by MI
-N_FEATURES = 250
-selected_features = mi_series.head(N_FEATURES).index.tolist()
-print(f"\\n✅ Selected top {N_FEATURES} features by Mutual Information for modeling.")
-print(f"Top 10 selected features:")
-for i, (feat, score) in enumerate(mi_series.head(10).items()):
-    print(f"  {i+1:2d}. {feat:45s} | MI = {score:.4f}")""")
+if FEATURE_SELECTOR == 'pearson':
+    selected_features = pearson_features
+    selected_scores = pearson_series
+    selector_name = 'Pearson'
+elif FEATURE_SELECTOR == 'mi':
+    selected_features = mi_features
+    selected_scores = mi_series
+    selector_name = 'Mutual Information'
+else:
+    raise ValueError("FEATURE_SELECTOR must be 'pearson' or 'mi'")
+
+print(f"\\n✅ Using {selector_name}: selected top {N_FEATURES} features for modeling.")
+print("Top 10 selected features:")
+for i, feat in enumerate(selected_features[:10], start=1):
+    print(f"  {i:2d}. {feat:45s} | score = {selected_scores[feat]:.4f}")""")
 
 # ============================================================
 # SECTION 6: TRAIN/TEST SPLIT & SCALING
@@ -571,7 +605,7 @@ print(f"\\nTest target distribution:\\n{y_test.value_counts()}")""")
 md("## 7. Model Training & Comparison")
 
 md("""### 7.1 Train Multiple Models (including ANN)
-We train several classifiers — including a Keras ANN — and compare their performance using 5-fold cross-validation on the training set, then evaluate on the held-out test set.""")
+We train several classifiers — including a Keras ANN — and compare their performance using 3-fold cross-validation on the training set, then evaluate on the held-out test set.""")
 
 code("""import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -590,7 +624,7 @@ models = {
 
 # Train and evaluate sklearn models
 results = []
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
 
 for name, model in models.items():
     cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='f1')
@@ -625,8 +659,8 @@ def build_ann():
     return model
 
 ann_model = build_ann()
-early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-ann_model.fit(X_train_scaled, y_train, epochs=100, batch_size=32,
+early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
+ann_model.fit(X_train_scaled, y_train, epochs=40, batch_size=32,
               validation_split=0.2, callbacks=[early_stop], verbose=0)
 
 y_pred_ann = (ann_model.predict(X_test_scaled, verbose=0) > 0.5).astype(int).flatten()
@@ -675,26 +709,26 @@ plt.show()""")
 md("## 8. Hyperparameter Tuning")
 
 md("""### 8.1 Tune Top Models
-We tune XGBoost, Gradient Boosting, Logistic Regression, and the ANN with reduced search iterations for faster execution (~5-8 min total).""")
+We tune XGBoost, Gradient Boosting, Logistic Regression, and the ANN with compact search spaces for faster execution (~2-4 min total).""")
 
 code("""tuned_results = []
 
-# --- XGBoost Tuning (reduced: 25 iter × 3cv ≈ 2 min) ---
+# --- XGBoost Tuning (fast: 10 iter × 2cv) ---
 print("--- Tuning XGBoost ---")
 param_dist_xgb = {
-    'n_estimators': randint(100, 800),
+    'n_estimators': randint(100, 400),
     'learning_rate': loguniform(0.01, 0.3),
-    'max_depth': randint(3, 10),
+    'max_depth': randint(3, 8),
     'subsample': uniform(0.6, 0.4),
     'colsample_bytree': uniform(0.6, 0.4),
-    'min_child_weight': randint(1, 7),
+    'min_child_weight': randint(1, 5),
     'reg_alpha': loguniform(0.01, 5),
     'reg_lambda': loguniform(0.01, 5),
 }
 xgb_search = RandomizedSearchCV(
     XGBClassifier(random_state=42, eval_metric='logloss'),
     param_distributions=param_dist_xgb,
-    n_iter=25, scoring='f1', cv=3, random_state=42, n_jobs=-1, verbose=0
+    n_iter=10, scoring='f1', cv=2, random_state=42, n_jobs=-1, verbose=0
 )
 xgb_search.fit(X_train_scaled, y_train)
 y_pred_xgb = xgb_search.best_estimator_.predict(X_test_scaled)
@@ -703,20 +737,20 @@ tuned_results.append({'Model': 'XGBoost (tuned)', 'Test Accuracy': accuracy_scor
     'Test F1': f1_score(y_test, y_pred_xgb), 'Test Precision': precision_score(y_test, y_pred_xgb),
     'Test Recall': recall_score(y_test, y_pred_xgb), 'estimator': xgb_search.best_estimator_})
 
-# --- Gradient Boosting Tuning (20 iter × 3cv ≈ 2 min) ---
+# --- Gradient Boosting Tuning (fast: 8 iter × 2cv) ---
 print("\\n--- Tuning Gradient Boosting ---")
 param_dist_gb = {
-    'n_estimators': randint(100, 600),
+    'n_estimators': randint(80, 300),
     'learning_rate': loguniform(0.01, 0.3),
-    'max_depth': randint(3, 8),
+    'max_depth': randint(2, 6),
     'subsample': uniform(0.6, 0.4),
-    'min_samples_split': randint(2, 15),
-    'min_samples_leaf': randint(1, 8),
+    'min_samples_split': randint(2, 10),
+    'min_samples_leaf': randint(1, 6),
 }
 gb_search = RandomizedSearchCV(
     GradientBoostingClassifier(random_state=42),
     param_distributions=param_dist_gb,
-    n_iter=20, scoring='f1', cv=3, random_state=42, n_jobs=-1, verbose=0
+    n_iter=8, scoring='f1', cv=2, random_state=42, n_jobs=-1, verbose=0
 )
 gb_search.fit(X_train_scaled, y_train)
 y_pred_gb = gb_search.best_estimator_.predict(X_test_scaled)
@@ -725,16 +759,16 @@ tuned_results.append({'Model': 'Gradient Boosting (tuned)', 'Test Accuracy': acc
     'Test F1': f1_score(y_test, y_pred_gb), 'Test Precision': precision_score(y_test, y_pred_gb),
     'Test Recall': recall_score(y_test, y_pred_gb), 'estimator': gb_search.best_estimator_})
 
-# --- Logistic Regression Tuning (15 iter × 3cv ≈ 30 sec) ---
+# --- Logistic Regression Tuning (fast: 8 iter × 2cv) ---
 print("\\n--- Tuning Logistic Regression ---")
 param_dist_lr = [
     {'C': loguniform(0.001, 100), 'solver': ['liblinear'], 'penalty': ['l1', 'l2']},
     {'C': loguniform(0.001, 100), 'solver': ['lbfgs'], 'penalty': ['l2']},
 ]
 lr_search = RandomizedSearchCV(
-    LogisticRegression(random_state=42, max_iter=5000),
+    LogisticRegression(random_state=42, max_iter=3000),
     param_distributions=param_dist_lr,
-    n_iter=15, scoring='f1', cv=3, random_state=42, n_jobs=-1, verbose=0
+    n_iter=8, scoring='f1', cv=2, random_state=42, n_jobs=-1, verbose=0
 )
 lr_search.fit(X_train_scaled, y_train)
 y_pred_lr = lr_search.best_estimator_.predict(X_test_scaled)
@@ -750,9 +784,7 @@ best_ann_model = None
 
 ann_configs = [
     {'layers': [128, 64, 32], 'dropout': 0.3, 'lr': 0.001},
-    {'layers': [256, 128, 64], 'dropout': 0.4, 'lr': 0.0005},
     {'layers': [64, 32], 'dropout': 0.2, 'lr': 0.001},
-    {'layers': [128, 64, 32, 16], 'dropout': 0.35, 'lr': 0.0008},
 ]
 
 for i, cfg in enumerate(ann_configs):
@@ -765,8 +797,8 @@ for i, cfg in enumerate(ann_configs):
     m.add(Dense(1, activation='sigmoid'))
     m.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=cfg['lr']),
               loss='binary_crossentropy', metrics=['accuracy'])
-    m.fit(X_train_scaled, y_train, epochs=100, batch_size=32,
-          validation_split=0.2, callbacks=[EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True)], verbose=0)
+    m.fit(X_train_scaled, y_train, epochs=40, batch_size=32,
+          validation_split=0.2, callbacks=[EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)], verbose=0)
     y_p = (m.predict(X_test_scaled, verbose=0) > 0.5).astype(int).flatten()
     f1_val = f1_score(y_test, y_p)
     print(f"  Config {i+1} {cfg['layers']} dr={cfg['dropout']} lr={cfg['lr']} → F1: {f1_val:.4f}")
@@ -905,7 +937,7 @@ md("""### Key Findings & Discussion
   - **NMF topic modeling** (20 interpretable topics)
   - **DistilBERT contextual embeddings** (full 768-dim per text column = 1,536 features) — captures deep semantic meaning
   - One-hot encoded categorical features (Sex, TASK)
-- Top 250 features were selected using Mutual Information
+- Top 250 features were selected using a configurable method (Pearson or Mutual Information)
 
 **Model Performance:**
 - Without the `Age` feature, this is a **challenging classification task** since the remaining features have weak individual correlations with the target
