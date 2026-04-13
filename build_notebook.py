@@ -703,6 +703,148 @@ for i, v in enumerate(results_sorted['Test Accuracy']):
 plt.tight_layout()
 plt.show()""")
 
+md("""### 7.3 End-to-End DistilBERT Fine-Tuning (GPU)
+This step upgrades DistilBERT from a static feature extractor to a fully trainable classifier.
+
+- Uses `DistilBertForSequenceClassification` with a trainable classification head
+- Trains with **AdamW** (`lr=2e-5`, `weight_decay=0.01`)
+- Uses weighted **CrossEntropyLoss** to mitigate class imbalance
+- Runs on GPU when available (`device='cuda'`)
+- Clears GPU cache at the end with `torch.cuda.empty_cache()`""")
+
+code("""import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+from torch.optim import AdamW
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Fine-tuning device: {device}")
+
+# Fine-tuning hyperparameters
+MAX_LEN = 128
+BATCH_SIZE = 16
+EPOCHS = 4
+LR = 2e-5
+WEIGHT_DECAY = 0.01
+
+# Build a single text field from both conversation directions
+combined_text = (text_to_gpt.astype(str) + " [SEP] " + text_from_gpt.astype(str))
+
+# Reuse the same train/test split indices from Section 6
+train_idx = X_train.index
+test_idx = X_test.index
+
+train_texts = combined_text.loc[train_idx].tolist()
+test_texts = combined_text.loc[test_idx].tolist()
+y_train_ft = y.loc[train_idx].astype(int).values
+y_test_ft = y.loc[test_idx].astype(int).values
+
+tokenizer_ft = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+model_ft = DistilBertForSequenceClassification.from_pretrained(
+    'distilbert-base-uncased',
+    num_labels=2
+).to(device)
+
+class ConversationDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        encoded = self.tokenizer(
+            self.texts[idx],
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_len,
+            return_tensors='pt'
+        )
+        return {
+            'input_ids': encoded['input_ids'].squeeze(0),
+            'attention_mask': encoded['attention_mask'].squeeze(0),
+            'labels': torch.tensor(self.labels[idx], dtype=torch.long)
+        }
+
+train_ds = ConversationDataset(train_texts, y_train_ft, tokenizer_ft, MAX_LEN)
+test_ds = ConversationDataset(test_texts, y_test_ft, tokenizer_ft, MAX_LEN)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+
+# Class-weighted cross-entropy for imbalance handling
+class_counts = np.bincount(y_train_ft, minlength=2)
+class_weights = len(y_train_ft) / (2.0 * np.maximum(class_counts, 1))
+class_weights_t = torch.tensor(class_weights, dtype=torch.float, device=device)
+criterion = torch.nn.CrossEntropyLoss(weight=class_weights_t)
+
+optimizer = AdamW(model_ft.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+print(f"Class counts: {class_counts.tolist()} | class weights: {[round(w, 4) for w in class_weights.tolist()]}")
+print(f"Training steps per epoch: {len(train_loader)}")
+
+# Training loop
+for epoch in range(EPOCHS):
+    model_ft.train()
+    running_loss = 0.0
+    for batch in train_loader:
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['labels'].to(device)
+
+        optimizer.zero_grad()
+        outputs = model_ft(input_ids=input_ids, attention_mask=attention_mask)
+        loss = criterion(outputs.logits, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+
+    avg_loss = running_loss / max(len(train_loader), 1)
+    print(f"Epoch {epoch+1}/{EPOCHS} - train loss: {avg_loss:.4f}")
+
+# Evaluation
+model_ft.eval()
+all_preds, all_true = [], []
+with torch.no_grad():
+    for batch in test_loader:
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['labels'].to(device)
+
+        logits = model_ft(input_ids=input_ids, attention_mask=attention_mask).logits
+        preds = torch.argmax(logits, dim=1)
+
+        all_preds.extend(preds.cpu().numpy())
+        all_true.extend(labels.cpu().numpy())
+
+ft_acc = accuracy_score(all_true, all_preds)
+ft_f1 = f1_score(all_true, all_preds)
+ft_prec = precision_score(all_true, all_preds)
+ft_rec = recall_score(all_true, all_preds)
+
+ft_metrics = {
+    'Model': 'DistilBERT Fine-Tuned',
+    'Test Accuracy': ft_acc,
+    'Test F1': ft_f1,
+    'Test Precision': ft_prec,
+    'Test Recall': ft_rec
+}
+
+print("\\n✅ DistilBERT Fine-Tuning Results")
+print(f"  Accuracy:  {ft_acc:.4f}")
+print(f"  F1 Score:  {ft_f1:.4f}")
+print(f"  Precision: {ft_prec:.4f}")
+print(f"  Recall:    {ft_rec:.4f}")
+
+print("\\nClassification report (fine-tuned DistilBERT):")
+print(classification_report(all_true, all_preds, target_names=['Young Adults', 'Older Adults']))
+
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    print("🧹 Cleared GPU cache with torch.cuda.empty_cache()")""")
+
 # ============================================================
 # SECTION 8: HYPERPARAMETER TUNING
 # ============================================================
