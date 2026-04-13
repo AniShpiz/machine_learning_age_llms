@@ -409,13 +409,12 @@ df[['msg_to_ttr', 'msg_to_hapax_ratio', 'msg_to_noun_ratio', 'msg_to_verb_ratio'
 md("""### 4.7 DistilBERT Contextual Embeddings
 We use **DistilBERT** (a lighter, faster version of BERT) to extract deep contextual embeddings from the text.
 These embeddings capture semantic meaning that TF-IDF and BoW cannot, encoding relationships between words in context.
-We reduce the 768-dimensional embeddings to 30 components using PCA.
+We keep the full 768-dimensional `[CLS]` embedding for each text column to preserve fine-grained semantic signal.
 
 > ⚠️ This cell uses GPU acceleration. Make sure to enable GPU in Colab: *Runtime → Change runtime type → GPU*""")
 
 code("""import torch
 from transformers import DistilBertTokenizer, DistilBertModel
-from sklearn.decomposition import PCA
 
 # Load DistilBERT model and tokenizer
 print("Loading DistilBERT model...")
@@ -445,13 +444,8 @@ for i, text in enumerate(text_to_gpt):
     if (i + 1) % 200 == 0:
         print(f"  Processed {i+1}/{len(text_to_gpt)} messages...")
 bert_to_array = np.array(bert_to_embeddings)
-
-# PCA dimensionality reduction (768 → 30)
-n_bert_components = 30
-pca_bert_to = PCA(n_components=n_bert_components, random_state=42)
-bert_to_pca = pca_bert_to.fit_transform(bert_to_array)
-bert_to_df = pd.DataFrame(bert_to_pca, columns=[f'bert_to_pc_{i}' for i in range(n_bert_components)], index=df.index)
-print(f"message_to_gpt: 768-dim → {n_bert_components} PCA components (variance explained: {pca_bert_to.explained_variance_ratio_.sum():.2%})")
+bert_to_df = pd.DataFrame(bert_to_array, columns=[f'bert_to_{i}' for i in range(bert_to_array.shape[1])], index=df.index)
+print(f"message_to_gpt: kept full {bert_to_array.shape[1]}-dim embedding")
 
 # Extract embeddings for message_from_gpt
 print("\\nExtracting DistilBERT embeddings for message_from_gpt...")
@@ -461,15 +455,12 @@ for i, text in enumerate(text_from_gpt):
     if (i + 1) % 200 == 0:
         print(f"  Processed {i+1}/{len(text_from_gpt)} messages...")
 bert_from_array = np.array(bert_from_embeddings)
-
-pca_bert_from = PCA(n_components=n_bert_components, random_state=42)
-bert_from_pca = pca_bert_from.fit_transform(bert_from_array)
-bert_from_df = pd.DataFrame(bert_from_pca, columns=[f'bert_from_pc_{i}' for i in range(n_bert_components)], index=df.index)
-print(f"message_from_gpt: 768-dim → {n_bert_components} PCA components (variance explained: {pca_bert_from.explained_variance_ratio_.sum():.2%})")
+bert_from_df = pd.DataFrame(bert_from_array, columns=[f'bert_from_{i}' for i in range(bert_from_array.shape[1])], index=df.index)
+print(f"message_from_gpt: kept full {bert_from_array.shape[1]}-dim embedding")
 
 # Add to main dataframe
 df = pd.concat([df, bert_to_df, bert_from_df], axis=1)
-print(f"\\n✅ Added {n_bert_components * 2} DistilBERT embedding features. DataFrame shape: {df.shape}")""")
+print(f"\\n✅ Added {bert_to_array.shape[1] + bert_from_array.shape[1]} DistilBERT embedding features. DataFrame shape: {df.shape}")""")
 
 md("""### 4.8 Assemble Final Feature Matrix""")
 
@@ -543,7 +534,7 @@ plt.tight_layout()
 plt.show()
 
 # Select top features by MI
-N_FEATURES = 50
+N_FEATURES = 250
 selected_features = mi_series.head(N_FEATURES).index.tolist()
 print(f"\\n✅ Selected top {N_FEATURES} features by Mutual Information for modeling.")
 print(f"Top 10 selected features:")
@@ -912,9 +903,9 @@ md("""### Key Findings & Discussion
   - **Punctuation & style features** (question marks, exclamation marks, punctuation density)
   - **TF-IDF + SVD** (Latent Semantic Analysis – 40 components)
   - **NMF topic modeling** (20 interpretable topics)
-  - **DistilBERT contextual embeddings** (768-dim → 60 PCA components) — captures deep semantic meaning
+  - **DistilBERT contextual embeddings** (full 768-dim per text column = 1,536 features) — captures deep semantic meaning
   - One-hot encoded categorical features (Sex, TASK)
-- Top 50 features were selected using Mutual Information
+- Top 250 features were selected using Mutual Information
 
 **Model Performance:**
 - Without the `Age` feature, this is a **challenging classification task** since the remaining features have weak individual correlations with the target
